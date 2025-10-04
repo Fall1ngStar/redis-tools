@@ -31,18 +31,18 @@ struct RedisInfo {
 #[derive(Debug, clap::Subcommand)]
 enum Commands {
     /// List all the keys matching a pattern
-    ScanKeys {
-        /// Pattern to scan
-        #[arg(default_value = "*")]
-        pattern: String,
+    ScanKeys(ScanOptions),
 
-        /// Sort the results
-        #[arg(short, long, action)]
-        sorted: bool,
+    /// Get all the values for keys matching a pattern
+    ///
+    /// Only work with string values
+    AllItems {
+        #[command(flatten)]
+        scan_options: ScanOptions,
 
-        /// Reverse the results
-        #[arg(short, long, action)]
-        reversed: bool,
+        /// Limit the number of items returned
+        #[arg(short, long)]
+        limit: Option<usize>,
     },
 }
 
@@ -52,22 +52,33 @@ async fn main() -> color_eyre::Result<()> {
     let args = Args::parse();
     let client = setup_client(&args.redis).await?;
     match args.command {
-        Commands::ScanKeys {
-            pattern,
-            sorted,
-            reversed,
-        } => {
-            let mut keys = scan(&client, &pattern).await?;
-            if sorted {
-                keys.sort();
-            }
-            if reversed {
-                keys.reverse();
-            }
+        Commands::ScanKeys(scan_options) => {
+            let keys = scan(&client, &scan_options).await?;
             keys.iter().for_each(|key| println!("{key}"));
+        }
+        Commands::AllItems {
+            scan_options,
+            limit,
+        } => {
+            all_items(&client, &scan_options, limit).await?;
         }
     }
     Ok(())
+}
+
+#[derive(Debug, clap::Args)]
+struct ScanOptions {
+    /// Pattern to scan
+    #[arg(default_value = "*")]
+    pattern: String,
+
+    /// Sort the results
+    #[arg(short, long, action)]
+    sorted: bool,
+
+    /// Reverse the results
+    #[arg(short, long, action)]
+    reversed: bool,
 }
 
 async fn setup_client(info: &RedisInfo) -> color_eyre::Result<Client> {
@@ -92,13 +103,41 @@ fn scan_stream<'a>(
     }
 }
 
-async fn scan(client: &Client, pattern: &str) -> color_eyre::Result<Vec<String>> {
-    let mut stream = scan_stream(client, pattern)?;
+async fn scan(client: &Client, options: &ScanOptions) -> color_eyre::Result<Vec<String>> {
+    let mut stream = scan_stream(client, &options.pattern)?;
     let mut result = Vec::new();
     while let Some(page) = stream.next().await {
         let mut page = page?;
         let keys = page.take_results().unwrap_or_default();
         result.extend(keys.into_iter().flat_map(|key| key.into_string()));
     }
+    if options.sorted {
+        result.sort();
+    }
+    if options.reversed {
+        result.reverse();
+    }
     Ok(result)
+}
+
+async fn all_items(
+    client: &Client,
+    scan_options: &ScanOptions,
+    limit: Option<usize>,
+) -> color_eyre::Result<()> {
+    let mut keys = scan(client, scan_options).await?;
+    if let Some(limit) = limit {
+        keys = keys.into_iter().take(limit).collect();
+    }
+    for chunk in keys.chunks(1000) {
+        let pipe = client.pipeline();
+        for key in chunk {
+            let _: () = pipe.get(key).await?;
+        }
+        let result: Vec<String> = pipe.all().await?;
+        for item in result {
+            println!("{item}");
+        }
+    }
+    Ok(())
 }
