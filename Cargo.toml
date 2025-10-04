@@ -9,3 +9,4 @@ color-eyre = "0.6.5"
 fred = "10.1.0"
 indicatif = "0.18.0"
 tokio = { version = "1.47.1", features = ["full"] }
+tokio-stream = "0.1.17"

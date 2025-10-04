@@ -837,6 +837,7 @@ dependencies = [
  "fred",
  "indicatif",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
