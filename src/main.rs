@@ -74,6 +74,16 @@ enum Commands {
         #[arg(long)]
         prefix: Option<String>,
     },
+
+    /// Find the keys using the most memory
+    FindLargestKeys {
+        #[command(flatten)]
+        scan_options: ScanOptions,
+
+        /// How many keys to return
+        #[arg(short, long, default_value = "10")]
+        top_n: usize,
+    },
 }
 
 #[tokio::main]
@@ -104,6 +114,12 @@ async fn main() -> color_eyre::Result<()> {
             prefix,
         } => {
             compute_stats(&client, &scan_options, &delimiter, prefix).await?;
+        }
+        Commands::FindLargestKeys {
+            scan_options,
+            top_n,
+        } => {
+            find_largest_keys(&client, &scan_options, top_n).await?;
         }
     }
     Ok(())
@@ -244,5 +260,41 @@ async fn compute_stats(
     if other > 0 {
         println!("Keys not matching prefix \"{prefix}\": {other}");
     }
+    Ok(())
+}
+
+async fn find_largest_keys(
+    client: &Client,
+    scan_options: &ScanOptions,
+    top_n: usize,
+) -> color_eyre::Result<()> {
+    let keys = scan(client, scan_options).await?;
+    let mut counter = Counter::<String>::new();
+
+    for chunk in keys.chunks(1000) {
+        let pipe = client.pipeline();
+        for key in chunk {
+            let _: () = pipe.memory_usage(key, None).await?;
+        }
+        let result: Vec<usize> = pipe.all().await?;
+        for (key, size) in chunk.iter().zip(result) {
+            counter[key] = size;
+        }
+        let cutoff = counter
+            .k_most_common_ordered(top_n)
+            .last()
+            .map(|(_, size)| *size)
+            .unwrap_or_default();
+        counter.retain(|_, size| *size >= cutoff);
+    }
+
+    let mut b = tabled::builder::Builder::with_capacity(counter.len() + 1, 2);
+    b.push_record(["key", "size"]);
+    for (key, size) in counter.k_most_common_ordered(top_n) {
+        b.push_record([&key, &size.to_string()]);
+    }
+    let mut table = b.build();
+    table.with(tabled::settings::Style::psql());
+    println!("{table}");
     Ok(())
 }
