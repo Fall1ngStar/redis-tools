@@ -1,6 +1,7 @@
 use std::pin::Pin;
 
 use clap::{ArgAction, Parser};
+use counter::Counter;
 use fred::{
     prelude::*,
     types::scan::{ScanResult, Scanner},
@@ -55,6 +56,24 @@ enum Commands {
         #[arg(long = "no-dry-run", default_value_t=true, action = ArgAction::SetFalse)]
         dry_run: bool,
     },
+
+    /// Count the numbers of keys with a common key structure
+    ComputeStats {
+        #[command(flatten)]
+        scan_options: ScanOptions,
+
+        /// Delimiter used by each group
+        ///
+        /// For instance, the key "abc:123:456" will belong to group "abc"
+        #[arg(short, long, default_value = ":")]
+        delimiter: String,
+
+        /// Common prefix to remove before computing the stats
+        ///
+        /// For instance, with the prefix "abc:", key "abc:123:456" will belong to group "123"
+        #[arg(long)]
+        prefix: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -78,6 +97,13 @@ async fn main() -> color_eyre::Result<()> {
             dry_run,
         } => {
             del_pattern(&client, &scan_options, dry_run).await?;
+        }
+        Commands::ComputeStats {
+            scan_options,
+            delimiter,
+            prefix,
+        } => {
+            compute_stats(&client, &scan_options, &delimiter, prefix).await?;
         }
     }
     Ok(())
@@ -183,5 +209,40 @@ async fn del_pattern(
         pb.inc(chunk.len() as u64);
     }
 
+    Ok(())
+}
+
+async fn compute_stats(
+    client: &Client,
+    scan_options: &ScanOptions,
+    delimiter: &str,
+    prefix: Option<String>,
+) -> color_eyre::Result<()> {
+    let keys = scan(client, scan_options).await?;
+    let mut counter = Counter::<String>::new();
+    let prefix = &prefix.unwrap_or_default();
+    let mut other = 0;
+    for key in keys {
+        let Some(key) = key.strip_prefix(prefix) else {
+            other += 1;
+            continue;
+        };
+        if let Some((group, _)) = key.split_once(delimiter) {
+            counter[&group.to_owned()] += 1;
+        } else {
+            counter[&"other".to_owned()] += 1;
+        }
+    }
+    let mut b = tabled::builder::Builder::with_capacity(counter.len() + 1, 2);
+    b.push_record(["prefix", "count"]);
+    for (group, count) in counter.most_common() {
+        b.push_record([&format!("{prefix}{group}"), &count.to_string()]);
+    }
+    let mut table = b.build();
+    table.with(tabled::settings::Style::psql());
+    println!("{table}");
+    if other > 0 {
+        println!("Keys not matching prefix \"{prefix}\": {other}");
+    }
     Ok(())
 }
