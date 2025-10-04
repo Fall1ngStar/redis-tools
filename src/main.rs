@@ -1,10 +1,11 @@
 use std::pin::Pin;
 
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use fred::{
     prelude::*,
     types::scan::{ScanResult, Scanner},
 };
+use indicatif::{ProgressBar, ProgressStyle};
 use tokio_stream::{Stream, StreamExt};
 
 /// A collection of useful commands to work with Redis / Valkey
@@ -44,6 +45,16 @@ enum Commands {
         #[arg(short, long)]
         limit: Option<usize>,
     },
+
+    /// Delete all the keys matching a pattern
+    DelPattern {
+        #[command(flatten)]
+        scan_options: ScanOptions,
+
+        /// Execute the deletion
+        #[arg(long = "no-dry-run", default_value_t=true, action = ArgAction::SetFalse)]
+        dry_run: bool,
+    },
 }
 
 #[tokio::main]
@@ -61,6 +72,12 @@ async fn main() -> color_eyre::Result<()> {
             limit,
         } => {
             all_items(&client, &scan_options, limit).await?;
+        }
+        Commands::DelPattern {
+            scan_options,
+            dry_run,
+        } => {
+            del_pattern(&client, &scan_options, dry_run).await?;
         }
     }
     Ok(())
@@ -139,5 +156,32 @@ async fn all_items(
             println!("{item}");
         }
     }
+    Ok(())
+}
+
+async fn del_pattern(
+    client: &Client,
+    scan_options: &ScanOptions,
+    dry_run: bool,
+) -> color_eyre::Result<()> {
+    let keys = scan(client, scan_options).await?;
+    if dry_run {
+        println!("{} keys to delete", keys.len());
+        return Ok(());
+    }
+    let pb = ProgressBar::new(keys.len() as u64).with_style(ProgressStyle::with_template(
+        "[{elapsed_precise}/{eta_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+    )?);
+    pb.set_message(format!(
+        "Deleting keys from pattern {}",
+        scan_options.pattern
+    ));
+
+    for chunk in keys.chunks(1000) {
+        let _: () = client.del(keys.to_vec()).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        pb.inc(chunk.len() as u64);
+    }
+
     Ok(())
 }
